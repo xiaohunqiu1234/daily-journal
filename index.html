@@ -38,6 +38,9 @@
             <i class="ti ti-upload"></i> 导入恢复
             <input type="file" id="import-input" accept=".json" style="display:none">
           </label>
+          <button class="text-btn" id="sync-btn" title="GitHub Gist 云同步">
+            <i class="ti ti-cloud"></i> <span class="sync-label">云同步</span>
+          </button>
         </div>
       </div>
     </aside>
@@ -108,6 +111,38 @@
   </div>
 
   <div class="toast" id="toast"></div>
+
+  <!-- 云同步设置 -->
+  <div class="modal-overlay" id="sync-modal" style="display:none">
+    <div class="modal">
+      <div class="modal-header">
+        <h2><i class="ti ti-cloud"></i> 云同步设置</h2>
+        <button class="icon-btn" id="sync-close" aria-label="关闭"><i class="ti ti-x"></i></button>
+      </div>
+      <p class="modal-desc">
+        将日志保存到你的 GitHub <strong>私密 Gist</strong>，实现跨设备、不依赖本机浏览器的持久化。
+        数据只存于你自己的 GitHub 账户；Token 仅保存在本浏览器，不会上传或写入代码仓库。
+      </p>
+
+      <label class="field-label" for="sync-token">GitHub Token（需勾选 <code>gist</code> 权限）</label>
+      <input type="password" id="sync-token" class="field-input" placeholder="ghp_… 或 github_pat_…" autocomplete="off">
+      <a class="field-hint" href="https://github.com/settings/tokens/new?scopes=gist&description=daily-journal"
+         target="_blank" rel="noopener">→ 点此创建仅含 gist 权限的 Token</a>
+
+      <label class="field-label" for="sync-gistid">Gist ID（已有则填写；留空则新建）</label>
+      <input type="text" id="sync-gistid" class="field-input" placeholder="留空 → 点「新建并连接」自动创建" autocomplete="off">
+
+      <div class="modal-actions">
+        <button class="text-btn" id="sync-create"><i class="ti ti-plus"></i> 新建并连接</button>
+        <button class="btn-primary" id="sync-connect"><i class="ti ti-plug"></i> 连接</button>
+      </div>
+
+      <div class="sync-status" id="sync-status"></div>
+      <button class="text-btn danger" id="sync-disconnect" style="display:none">
+        <i class="ti ti-plug-off"></i> 断开云同步
+      </button>
+    </div>
+  </div>
 
   <script src="js/app.js"></script>
 </body>
