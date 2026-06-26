@@ -45,19 +45,32 @@ function saveSyncCfg(cfg) {
   else localStorage.removeItem(SYNC_CFG_KEY);
 }
 
-// 合并两份数据：同一天以 updatedAt 较新者为准，缺失的键互相补全
+// 合并两份数据。规则：
+//   1. 「有内容」永远胜过「空」—— 空记录绝不覆盖有内容的记录（不看时间戳）
+//   2. 两者都有内容（或都为空）时，才比 updatedAt 取较新者
+// 这样可避免「自动选中今天产生的空记录 + 新时间戳」把真实内容覆盖掉。
 function mergeStores(base, extra) {
   const out = Object.assign({}, base);
   for (const k of Object.keys(extra)) {
-    if (!out[k]) {
-      out[k] = extra[k];
+    const a = out[k], b = extra[k];
+    if (!a) { out[k] = b; continue; }
+    const ca = hasContent(a), cb = hasContent(b);
+    if (ca !== cb) {
+      out[k] = ca ? a : b;
     } else {
-      const ta = out[k].updatedAt || '';
-      const tb = extra[k].updatedAt || '';
-      if (tb > ta) out[k] = extra[k];
+      const ta = a.updatedAt || '', tb = b.updatedAt || '';
+      if (tb > ta) out[k] = b;
     }
   }
   return out;
+}
+
+// 推送到云端/服务器前，剔除没有任何内容的空记录，保持存储干净、
+// 并杜绝空记录再次参与同步、污染其他设备。
+function pruneEmpty(s) {
+  const o = {};
+  for (const k of Object.keys(s)) if (hasContent(s[k])) o[k] = s[k];
+  return o;
 }
 
 // ----- 本地服务器后端 -----
@@ -104,7 +117,7 @@ async function gistLoad() {
 
 async function gistSave(store) {
   await gistRequest('PATCH', `https://api.github.com/gists/${gistCfg.gistId}`, {
-    files: { [GIST_FILE]: { content: JSON.stringify(store, null, 2) } }
+    files: { [GIST_FILE]: { content: JSON.stringify(pruneEmpty(store), null, 2) } }
   });
 }
 
@@ -112,7 +125,7 @@ async function gistCreate(store) {
   const data = await gistRequest('POST', 'https://api.github.com/gists', {
     description: '每日日志数据 (daily-journal)',
     public: false,
-    files: { [GIST_FILE]: { content: JSON.stringify(store, null, 2) } }
+    files: { [GIST_FILE]: { content: JSON.stringify(pruneEmpty(store), null, 2) } }
   });
   return data.id;
 }
@@ -166,12 +179,13 @@ function commitOpenIfDirty() {
   const cur = collectData();
   const prev = store[selectedKey];
   const strip = o => { const x = Object.assign({}, o); delete x.updatedAt; return JSON.stringify(x); };
-  if (!prev || strip(cur) !== strip(prev)) {
-    store[selectedKey] = cur;
-    saveLocal(store);
-    return true;
-  }
-  return false;
+  // 内容没变（除时间戳外）→ 不动，避免无意义地刷新时间戳
+  if (prev && strip(cur) === strip(prev)) return false;
+  // 空白且原本就没有/也是空 → 不创建空记录（杜绝「空 + 新时间戳」污染同步）
+  if (!hasContent(cur) && (!prev || !hasContent(prev))) return false;
+  store[selectedKey] = cur;
+  saveLocal(store);
+  return true;
 }
 
 // 核心同步：pull → merge → push。保存、手动同步、回到页面都走它。
@@ -404,7 +418,10 @@ function collectData() {
 
 function commitSave(showFeedback) {
   if (!selectedKey) return;
-  store[selectedKey] = collectData();
+  const data = collectData();
+  // 空白记录不入库（避免「自动选中今天」产生空记录并参与同步）
+  if (hasContent(data)) store[selectedKey] = data;
+  else delete store[selectedKey];
   saveStore(store);
   renderCalendar();
   if (showFeedback) {
@@ -511,7 +528,7 @@ window.addEventListener('beforeunload', () => {
         'Accept': 'application/vnd.github+json',
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({ files: { [GIST_FILE]: { content: JSON.stringify(store, null, 2) } } })
+      body: JSON.stringify({ files: { [GIST_FILE]: { content: JSON.stringify(pruneEmpty(store), null, 2) } } })
     });
   }
 });
