@@ -159,22 +159,80 @@ async function loadStore() {
   return local;
 }
 
-// Gist 写入防抖，避免连续切换日期时频繁打 API
-let gistTimer = null;
-function scheduleGistSave(store) {
-  clearTimeout(gistTimer);
-  gistTimer = setTimeout(() => {
-    gistSave(store).catch(() => showToast('云同步保存失败'));
-  }, 800);
+// 把当前打开面板里「已改动但未提交」的内容并入 store（赋予最新 updatedAt），
+// 这样同步合并时本设备的编辑一定胜出，不会被云端旧数据覆盖。返回是否有改动。
+function commitOpenIfDirty() {
+  if (!selectedKey) return false;
+  const cur = collectData();
+  const prev = store[selectedKey];
+  const strip = o => { const x = Object.assign({}, o); delete x.updatedAt; return JSON.stringify(x); };
+  if (!prev || strip(cur) !== strip(prev)) {
+    store[selectedKey] = cur;
+    saveLocal(store);
+    return true;
+  }
+  return false;
 }
 
-function saveStore(store) {
+// 核心同步：pull → merge → push。保存、手动同步、回到页面都走它。
+// opts.announce 控制是否提示「已同步」。并发安全：同一时刻只跑一个，跑完若期间又有改动则补跑。
+let syncing = false;
+let syncQueued = false;
+async function syncWithRemote(opts = {}) {
+  if (backend !== 'gist' || !gistCfg) return;
+  if (syncing) { syncQueued = true; if (opts.announce) showToast('同步中…'); return; }
+  syncing = true;
+  try {
+    const localChanged = commitOpenIfDirty();
+    const openBefore = selectedKey ? JSON.stringify(store[selectedKey]) : null;
+
+    let remote = null;
+    try { remote = await gistLoad(); }
+    catch (e) { if (opts.announce) showToast('拉取云端失败：' + e.message); }
+
+    if (remote) {
+      const before = JSON.stringify(store);
+      store = mergeStores(remote, store); // 同一天以 updatedAt 较新者为准
+      if (JSON.stringify(store) !== before) {
+        saveLocal(store);
+        renderCalendar();
+      }
+      // 仅当「当前打开的这一天」被云端较新内容更新时，才刷新面板，避免打断输入
+      const openAfter = selectedKey ? JSON.stringify(store[selectedKey]) : null;
+      if (openBefore !== openAfter) refreshOpenPanel();
+    }
+
+    // 本地比云端多/新才回写，避免无意义写入（如纯粹回到页面且无变化）
+    const needPush = localChanged || !remote || JSON.stringify(store) !== JSON.stringify(remote);
+    if (opts.force || needPush) {
+      try { await gistSave(store); gistDirty = false; }
+      catch (e) { showToast('云同步保存失败：' + e.message); return; }
+    } else {
+      gistDirty = false;
+    }
+    if (opts.announce) showToast('已与云端同步');
+  } finally {
+    syncing = false;
+    if (syncQueued) { syncQueued = false; syncWithRemote(); }
+  }
+}
+
+// Gist 写入防抖，避免连续切换日期时频繁打 API
+let gistTimer = null;
+let gistDirty = false; // 是否有改动尚未成功推送到云端（供关闭页面时判断）
+function scheduleGistSave() {
+  gistDirty = true;
+  clearTimeout(gistTimer);
+  gistTimer = setTimeout(() => syncWithRemote(), 800);
+}
+
+function saveStore() {
   // 始终镜像到 localStorage 作为缓存
   saveLocal(store);
   if (backend === 'server') {
     saveServer(store).catch(() => showToast('写入本地文件失败'));
   } else if (backend === 'gist') {
-    scheduleGistSave(store);
+    scheduleGistSave();
   }
 }
 
@@ -438,12 +496,12 @@ document.getElementById('import-input').addEventListener('change', e => {
 // 关闭页面前保存：localStorage 同步写入；云端/服务器尽力送达
 window.addEventListener('beforeunload', () => {
   if (!selectedKey) return;
-  store[selectedKey] = collectData();
-  saveLocal(store);
+  const dirty = commitOpenIfDirty();
   if (backend === 'server' && navigator.sendBeacon) {
     navigator.sendBeacon(API_URL, new Blob([JSON.stringify(store)], { type: 'application/json' }));
-  } else if (backend === 'gist' && gistCfg) {
-    // sendBeacon 无法带 Authorization 头，改用 keepalive fetch 尽力送达
+  } else if (backend === 'gist' && gistCfg && (dirty || gistDirty)) {
+    // 仅在有未推送改动时才在关闭瞬间补推。sendBeacon 无法带 Authorization 头，
+    // 改用 keepalive fetch 尽力送达（无法在此做 pull-merge，属尽力兜底）。
     clearTimeout(gistTimer);
     fetch(`https://api.github.com/gists/${gistCfg.gistId}`, {
       method: 'PATCH',
@@ -457,6 +515,20 @@ window.addEventListener('beforeunload', () => {
     });
   }
 });
+
+// 回到页面（切回标签页 / 窗口重新聚焦）时自动从云端拉取，看到其他设备的更新
+let lastPull = 0;
+function maybePull() {
+  if (backend !== 'gist') return;
+  const now = Date.now();
+  if (now - lastPull < 5000) return; // 防抖，避免频繁触发
+  lastPull = now;
+  syncWithRemote();
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') maybePull();
+});
+window.addEventListener('focus', maybePull);
 
 // ===== 云同步设置面板 =====
 function updateSyncIndicator() {
@@ -473,7 +545,7 @@ function openSyncModal() {
   document.getElementById('sync-gistid').value = cfg.gistId || '';
   document.getElementById('sync-status').textContent = backend === 'gist'
     ? `当前：已连接 Gist ${cfg.gistId}` : '当前：未启用云同步';
-  document.getElementById('sync-disconnect').style.display = backend === 'gist' ? 'inline-flex' : 'none';
+  document.getElementById('sync-connected-actions').style.display = backend === 'gist' ? 'flex' : 'none';
   document.getElementById('sync-modal').style.display = 'flex';
 }
 
@@ -510,7 +582,7 @@ async function connectGist(createNew) {
     refreshOpenPanel();
     updateSyncIndicator();
     statusEl.textContent = `已连接 ✓ Gist ${gistId}`;
-    document.getElementById('sync-disconnect').style.display = 'inline-flex';
+    document.getElementById('sync-connected-actions').style.display = 'flex';
     showToast('云同步已开启');
   } catch (e) {
     gistCfg = prevCfg;
@@ -528,7 +600,7 @@ function disconnectGist() {
     .catch(() => { backend = 'local'; })
     .finally(() => { updateSyncIndicator(); });
   document.getElementById('sync-status').textContent = '已断开云同步（数据仍保留在本浏览器）';
-  document.getElementById('sync-disconnect').style.display = 'none';
+  document.getElementById('sync-connected-actions').style.display = 'none';
   showToast('已断开云同步');
 }
 
@@ -547,6 +619,13 @@ document.getElementById('sync-modal').addEventListener('click', e => {
 document.getElementById('sync-connect').addEventListener('click', () => connectGist(false));
 document.getElementById('sync-create').addEventListener('click', () => connectGist(true));
 document.getElementById('sync-disconnect').addEventListener('click', disconnectGist);
+document.getElementById('sync-now').addEventListener('click', () => {
+  const el = document.getElementById('sync-status');
+  el.textContent = '同步中…';
+  syncWithRemote({ announce: true, force: true }).then(() => {
+    if (backend === 'gist') el.textContent = `当前：已连接 Gist ${gistCfg.gistId}`;
+  });
+});
 
 // ===== 初始化 =====
 async function init() {

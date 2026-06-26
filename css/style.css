@@ -410,8 +410,9 @@ html, body { height: 100%; font-family: -apple-system, BlinkMacSystemFont, 'Ping
 .field-hint:hover { text-decoration: underline; }
 .modal-actions { display: flex; gap: 8px; margin-top: 18px; }
 .sync-status { font-size: 12px; color: var(--text-2); margin-top: 14px; min-height: 16px; word-break: break-all; }
-.text-btn.danger { color: var(--text-3); margin-top: 10px; }
-.text-btn.danger:hover { color: #c0392b; }
+.sync-connected-actions { display: flex; gap: 8px; margin-top: 12px; }
+.text-btn.danger { color: var(--text-3); }
+.text-btn.danger:hover { color: #c0392b; border-color: #c0392b; }
 
 /* ===== Responsive ===== */
 @media (max-width: 700px) {
